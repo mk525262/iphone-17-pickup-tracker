@@ -1,0 +1,79 @@
+name: Telegram Delivery Diagnostic
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Telegram diagnostics
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python <<'PY'
+          import requests, os, json
+          from pathlib import Path
+
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
+          configured_chat = str(os.environ["TELEGRAM_CHAT_ID"]).strip()
+          base = f"https://api.telegram.org/bot{token}"
+
+          def show(label, response):
+              try:
+                  data = response.json()
+              except Exception:
+                  data = {"raw": response.text[:500]}
+              print(label, "HTTP", response.status_code, json.dumps(data, ensure_ascii=False)[:2000])
+              return data
+
+          me = show("getMe:", requests.get(base + "/getMe", timeout=20))
+          webhook = show("getWebhookInfo:", requests.get(base + "/getWebhookInfo", timeout=20))
+
+          chat = show("getChat:", requests.post(base + "/getChat", json={"chat_id": configured_chat}, timeout=20))
+          chat_data = chat.get("result", {}) if chat.get("ok") else {}
+          print("Configured chat valid:", bool(chat.get("ok")))
+          if chat_data:
+              print("Configured chat type:", chat_data.get("type"))
+              print("Configured chat ID matches secret:", str(chat_data.get("id")) == configured_chat)
+
+          webhook_url = (webhook.get("result") or {}).get("url", "") if webhook.get("ok") else ""
+          if not webhook_url:
+              updates = show("getUpdates:", requests.get(base + "/getUpdates", params={"limit": 20, "allowed_updates": json.dumps(["message"])}, timeout=20))
+              candidates = []
+              for update in updates.get("result", []) if updates.get("ok") else []:
+                  msg = update.get("message") or {}
+                  c = msg.get("chat") or {}
+                  if c.get("id") is not None:
+                      candidates.append((str(c.get("id")), c.get("type"), update.get("update_id")))
+              print("Recent update chat count:", len(candidates))
+              for cid, ctype, uid in candidates[-10:]:
+                  print("Recent chat candidate:", "last4=" + cid[-4:], "type=" + str(ctype), "update=" + str(uid), "matches_configured=" + str(cid == configured_chat))
+          else:
+              print("getUpdates skipped because a Telegram webhook is configured.")
+
+          test_text = "🧪 Telegram delivery diagnostic — GitHub Actions test\n\nIf you can see this message, Telegram delivery is working."
+          sent = show("sendMessage:", requests.post(base + "/sendMessage", json={"chat_id": configured_chat, "text": test_text}, timeout=20))
+          result = sent.get("result", {}) if sent.get("ok") else {}
+          if result:
+              print("Sent message_id:", result.get("message_id"))
+
+          Path("telegram-diagnostic.done").write_text("diagnostic completed\n")
+          PY
+
+      - name: Disable diagnostic after first run
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add telegram-diagnostic.done
+          git commit -m "Mark Telegram diagnostic complete"
+          git push
