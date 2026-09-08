@@ -1,0 +1,195 @@
+name: iPhone 17 Pickup Stock Monitor
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: iphone-17-stock-check
+  cancel-in-progress: true
+
+jobs:
+  check-stock:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Python packages
+        run: pip install requests
+
+      - name: Check Apple pickup stock
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python <<'PY'
+          import requests
+          import json
+          import os
+          from pathlib import Path
+          from urllib.parse import urlencode
+
+          PARTS = {
+              "Black": "MG6J4HN/A",
+              "White": "MG6K4HN/A",
+              "Mist Blue": "MG6L4HN/A",
+              "Lavender": "MG6M4HN/A",
+              "Sage": "MG6N4HN/A",
+          }
+
+          STORES = {
+              "Apple Saket": "110017",
+              "Apple Noida": "201301",
+          }
+
+          API = "https://www.apple.com/in/shop/retail/pickup-message"
+          STATE_FILE = Path("state.json")
+
+          headers = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+              "Accept": "application/json, text/plain, */*",
+              "Referer": "https://www.apple.com/in/shop/buy-iphone/iphone-17",
+          }
+
+          def check_store(store_name, pin):
+              params = {
+                  "pl": "true",
+                  "searchNearby": "true",
+                  "location": pin,
+                  "mts.0": "regular",
+              }
+
+              for i, part in enumerate(PARTS.values()):
+                  params[f"parts.{i}"] = part
+
+              r = requests.get(API, params=params, headers=headers, timeout=20)
+              r.raise_for_status()
+              data = r.json()
+
+              stores = data.get("body", {}).get("stores", [])
+
+              target = None
+              for s in stores:
+                  name = (s.get("storeName") or "").lower()
+                  if store_name.lower().replace("apple ", "") in name or \
+                     store_name.lower() in name:
+                      target = s
+                      break
+
+              if not target:
+                  print(f"{store_name}: store not found in Apple response")
+                  return [], False
+
+              found = []
+
+              for colour, part in PARTS.items():
+                  item = target.get("partsAvailability", {}).get(part, {})
+                  status = item.get("pickupDisplay")
+
+                  print(f"{store_name} | {colour} | {status}")
+
+                  if status == "available":
+                      found.append({
+                          "store": store_name,
+                          "colour": colour,
+                          "storage": "256GB"
+                      })
+
+              return found, True
+
+          available = []
+          successful_checks = 0
+
+          for store, pin in STORES.items():
+              try:
+                  items, ok = check_store(store, pin)
+                  if ok:
+                      successful_checks += 1
+                      available.extend(items)
+              except Exception as e:
+                  print(f"{store}: ERROR: {e}")
+
+          # Never interpret an API failure as "out of stock".
+          if successful_checks != len(STORES):
+              print("CHECK INCOMPLETE - state will NOT be reset.")
+              raise SystemExit(1)
+
+          previous = {"any_available": False}
+
+          if STATE_FILE.exists():
+              try:
+                  previous = json.loads(STATE_FILE.read_text())
+              except Exception:
+                  pass
+
+          now_available = len(available) > 0
+
+          print("Previous:", previous)
+          print("Current available:", available)
+
+          # Alert ONLY when stock returns after everything was unavailable.
+          stock_returned = now_available and not previous.get("any_available", False)
+
+          if stock_returned:
+              token = os.environ["TELEGRAM_BOT_TOKEN"]
+              chat_id = os.environ["TELEGRAM_CHAT_ID"]
+
+              message = "🚨 iPhone 17 PICKUP AVAILABLE 🚨\n\n"
+
+              # Location first, as requested.
+              for item in available:
+                  message += (
+                      f"📍 {item['store']}\n"
+                      f"🎨 {item['colour']}\n"
+                      f"💾 {item['storage']}\n"
+                      f"🔗 https://www.apple.com/in/shop/buy-iphone/iphone-17\n\n"
+                  )
+
+              message += "⚡ Apple Store pickup stock detected."
+
+              url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+              # Maximum 50 Telegram alerts for one stock-return event.
+              for n in range(50):
+                  resp = requests.post(
+                      url,
+                      json={
+                          "chat_id": chat_id,
+                          "text": message
+                      },
+                      timeout=20
+                  )
+                  print("Telegram:", resp.status_code)
+
+                  if resp.status_code == 429:
+                      print("Telegram rate limit reached; stopping burst.")
+                      break
+
+          STATE_FILE.write_text(
+              json.dumps(
+                  {
+                      "any_available": now_available,
+                      "available": available
+                  },
+                  indent=2
+              )
+          )
+          PY
+
+      - name: Save state
+        run: |
+          if git diff --quiet state.json; then
+            echo "State unchanged."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state.json
+            git commit -m "Update stock monitor state"
+            git push
+          fi
