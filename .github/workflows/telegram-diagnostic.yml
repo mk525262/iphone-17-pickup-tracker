@@ -15,7 +15,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check diagnostic gate
+        id: gate
+        run: |
+          if [ -f telegram-diagnostic.done ]; then
+            echo "done=true" >> "$GITHUB_OUTPUT"
+            echo "Diagnostic already completed; skipping."
+          else
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run Telegram diagnostics
+        if: steps.gate.outputs.done != 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -36,7 +47,7 @@ jobs:
               print(label, "HTTP", response.status_code, json.dumps(data, ensure_ascii=False)[:2000])
               return data
 
-          me = show("getMe:", requests.get(base + "/getMe", timeout=20))
+          show("getMe:", requests.get(base + "/getMe", timeout=20))
           webhook = show("getWebhookInfo:", requests.get(base + "/getWebhookInfo", timeout=20))
 
           chat = show("getChat:", requests.post(base + "/getChat", json={"chat_id": configured_chat}, timeout=20))
@@ -70,7 +81,8 @@ jobs:
           Path("telegram-diagnostic.done").write_text("diagnostic completed\n")
           PY
 
-      - name: Disable diagnostic after first run
+      - name: Mark diagnostic complete
+        if: steps.gate.outputs.done != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
