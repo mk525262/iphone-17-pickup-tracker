@@ -104,7 +104,7 @@ jobs:
               print("CHECK INCOMPLETE - state will NOT be reset and no daily Telegram report will be sent.")
               raise SystemExit(1)
 
-          previous = {"any_available": False}
+          previous = {"any_available": False, "telegram_test_sent": False}
           if STATE_FILE.exists():
               try:
                   previous = json.loads(STATE_FILE.read_text())
@@ -117,6 +117,17 @@ jobs:
           chat_id = os.environ["TELEGRAM_CHAT_ID"]
           telegram_url = f"https://api.telegram.org/bot{token}/sendMessage"
           alert_count = 0
+          telegram_test_sent = previous.get("telegram_test_sent", False)
+
+          # One-time Telegram connectivity test. It does not affect stock state or alerts.
+          if not telegram_test_sent:
+              test_message = "🧪 iPhone 17 Pickup Tracker — Telegram TEST\n\n✅ Telegram bot connection is working.\n📍 Apple Saket + Apple Noida\n💾 iPhone 17 256GB\n\nThis is a one-time test message."
+              test_resp = requests.post(telegram_url, json={"chat_id": chat_id, "text": test_message}, timeout=20)
+              print("Telegram test:", test_resp.status_code)
+              if test_resp.status_code == 200:
+                  telegram_test_sent = True
+              else:
+                  print("Telegram test error:", test_resp.text[:500])
 
           # Immediate alert whenever stock returns after all watched variants were unavailable.
           if stock_returned:
@@ -173,7 +184,7 @@ jobs:
               except Exception as e:
                   print("Google Sheet logging error:", e)
 
-          STATE_FILE.write_text(json.dumps({"any_available": now_available, "available": available}, indent=2))
+          STATE_FILE.write_text(json.dumps({"any_available": now_available, "available": available, "telegram_test_sent": telegram_test_sent}, indent=2))
           PY
 
       - name: Save state
