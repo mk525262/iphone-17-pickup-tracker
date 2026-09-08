@@ -53,6 +53,7 @@ jobs:
           API = "https://www.apple.com/in/shop/retail/pickup-message"
           STATE_FILE = Path("state.json")
           SHEET_WEBHOOK = os.environ["GOOGLE_SHEET_WEBHOOK"]
+          IST = ZoneInfo("Asia/Kolkata")
 
           headers = {
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
@@ -61,52 +62,34 @@ jobs:
           }
 
           def check_store(store_name, pin):
-              params = {
-                  "pl": "true",
-                  "searchNearby": "true",
-                  "location": pin,
-                  "mts.0": "regular",
-              }
+              params = {"pl": "true", "searchNearby": "true", "location": pin, "mts.0": "regular"}
               for i, part in enumerate(PARTS.values()):
                   params[f"parts.{i}"] = part
-
               r = requests.get(API, params=params, headers=headers, timeout=20)
               r.raise_for_status()
               data = r.json()
               stores = data.get("body", {}).get("stores", [])
-
               target = None
               for s in stores:
                   name = (s.get("storeName") or "").lower()
                   if store_name.lower().replace("apple ", "") in name or store_name.lower() in name:
                       target = s
                       break
-
               if not target:
                   print(f"{store_name}: store not found in Apple response")
                   return [], False
-
               found = []
               for colour, part in PARTS.items():
-                  item = target.get("partsAvailability", {}).get(part, {})
-                  status = item.get("pickupDisplay")
+                  status = target.get("partsAvailability", {}).get(part, {}).get("pickupDisplay")
                   print(f"{store_name} | {colour} | {status}")
-
                   if status in ("available", "unavailable"):
-                      found.append({
-                          "store": store_name,
-                          "colour": colour,
-                          "storage": "256GB",
-                          "status": status,
-                      })
+                      found.append({"store": store_name, "colour": colour, "storage": "256GB", "status": status})
                   else:
                       raise RuntimeError(f"Unexpected pickup status for {store_name} / {colour}: {status}")
               return found, True
 
-          results = []
-          available = []
+          results, available = [], []
           successful_checks = 0
-
           for store, pin in STORES.items():
               try:
                   items, ok = check_store(store, pin)
@@ -118,7 +101,7 @@ jobs:
                   print(f"{store}: ERROR: {e}")
 
           if successful_checks != len(STORES):
-              print("CHECK INCOMPLETE - state will NOT be reset and Sheet will not receive a false stock result.")
+              print("CHECK INCOMPLETE - state will NOT be reset and no daily Telegram report will be sent.")
               raise SystemExit(1)
 
           previous = {"any_available": False}
@@ -128,30 +111,22 @@ jobs:
               except Exception:
                   pass
 
-          now_available = len(available) > 0
-          print("Previous:", previous)
-          print("Current available:", available)
-
+          now_available = bool(available)
           stock_returned = now_available and not previous.get("any_available", False)
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id = os.environ["TELEGRAM_CHAT_ID"]
+          telegram_url = f"https://api.telegram.org/bot{token}/sendMessage"
           alert_count = 0
 
+          # Immediate alert whenever stock returns after all watched variants were unavailable.
           if stock_returned:
-              token = os.environ["TELEGRAM_BOT_TOKEN"]
-              chat_id = os.environ["TELEGRAM_CHAT_ID"]
               message = "🚨 iPhone 17 PICKUP AVAILABLE 🚨\n\n"
               for item in available:
-                  message += (
-                      f"📍 {item['store']}\n"
-                      f"🎨 {item['colour']}\n"
-                      f"💾 {item['storage']}\n"
-                      f"🔗 https://www.apple.com/in/shop/buy-iphone/iphone-17\n\n"
-                  )
+                  message += f"📍 {item['store']}\n🎨 {item['colour']}\n💾 {item['storage']}\n🔗 https://www.apple.com/in/shop/buy-iphone/iphone-17\n\n"
               message += "⚡ Apple Store pickup stock detected."
-
-              url = f"https://api.telegram.org/bot{token}/sendMessage"
               for n in range(1, 51):
-                  resp = requests.post(url, json={"chat_id": chat_id, "text": message}, timeout=20)
-                  print("Telegram:", resp.status_code, "alert", n)
+                  resp = requests.post(telegram_url, json={"chat_id": chat_id, "text": message}, timeout=20)
+                  print("Telegram stock alert:", resp.status_code, "alert", n)
                   if resp.status_code == 200:
                       alert_count = n
                   elif resp.status_code == 429:
@@ -161,9 +136,25 @@ jobs:
                       print("Telegram error:", resp.text[:500])
                       break
 
-          timestamp = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
-          event = "STOCK_RETURNED" if stock_returned else "CHECK"
+          # Mandatory daily status reports at 09:00, 13:00, 17:00 and 21:00 IST.
+          now_ist = datetime.now(IST)
+          daily_report = (now_ist.hour, now_ist.minute) in {(9, 0), (13, 0), (17, 0), (21, 0)}
+          if daily_report:
+              if now_available:
+                  lines = ["🟢 AVAILABLE"]
+                  for item in available:
+                      lines.append(f"📍 {item['store']} | 🎨 {item['colour']} | 💾 {item['storage']}")
+              else:
+                  lines = ["🔴 UNAVAILABLE", "All watched iPhone 17 256GB variants are currently unavailable at Apple Saket and Apple Noida."]
+              daily_message = "📊 iPhone 17 Pickup Status\n\n" + "\n".join(lines) + f"\n\n🕐 {now_ist.strftime('%Y-%m-%d %H:%M:%S')} IST"
+              resp = requests.post(telegram_url, json={"chat_id": chat_id, "text": daily_message}, timeout=20)
+              print("Telegram daily status:", resp.status_code, now_ist.strftime('%H:%M IST'))
+              if resp.status_code != 200:
+                  print("Telegram daily status error:", resp.text[:500])
 
+          # Log every successful stock check to Google Sheet.
+          timestamp = now_ist.strftime("%Y-%m-%d %H:%M:%S")
+          event = "STOCK_RETURNED" if stock_returned else "CHECK"
           for item in results:
               payload = {
                   "timestamp": timestamp,
@@ -196,7 +187,3 @@ jobs:
             git commit -m "Update stock monitor state"
             git push
           fi
-
-      - name: Telegram Test
-        if: false
-        run: echo "Telegram test disabled"
