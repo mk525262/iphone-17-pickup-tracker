@@ -27,13 +27,14 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOOGLE_SHEET_WEBHOOK: "https://script.google.com/macros/s/AKfycbzdBjbL3JE9oSapVy1N0bD7Wcc-52EdGFma8vkExnBZ1uae-IxKBOrRgFfe58Kk_NY/exec"
         run: |
           python <<'PY'
           import requests
           import json
           import os
           from pathlib import Path
-          from urllib.parse import urlencode
+          from datetime import datetime, timezone
 
           PARTS = {
               "Black": "MG6J4HN/A",
@@ -50,6 +51,7 @@ jobs:
 
           API = "https://www.apple.com/in/shop/retail/pickup-message"
           STATE_FILE = Path("state.json")
+          SHEET_WEBHOOK = os.environ["GOOGLE_SHEET_WEBHOOK"]
 
           headers = {
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
@@ -98,11 +100,23 @@ jobs:
                       found.append({
                           "store": store_name,
                           "colour": colour,
-                          "storage": "256GB"
+                          "storage": "256GB",
+                          "status": "available",
                       })
+                  elif status == "unavailable":
+                      found.append({
+                          "store": store_name,
+                          "colour": colour,
+                          "storage": "256GB",
+                          "status": "unavailable",
+                      })
+                  else:
+                      # Unknown status is treated as an incomplete check.
+                      raise RuntimeError(f"Unexpected pickup status for {store_name} / {colour}: {status}")
 
               return found, True
 
+          results = []
           available = []
           successful_checks = 0
 
@@ -111,13 +125,14 @@ jobs:
                   items, ok = check_store(store, pin)
                   if ok:
                       successful_checks += 1
-                      available.extend(items)
+                      results.extend(items)
+                      available.extend([x for x in items if x["status"] == "available"])
               except Exception as e:
                   print(f"{store}: ERROR: {e}")
 
           # Never interpret an API failure as "out of stock".
           if successful_checks != len(STORES):
-              print("CHECK INCOMPLETE - state will NOT be reset.")
+              print("CHECK INCOMPLETE - state will NOT be reset and Sheet will not receive a false stock result.")
               raise SystemExit(1)
 
           previous = {"any_available": False}
@@ -135,6 +150,8 @@ jobs:
 
           # Alert ONLY when stock returns after everything was unavailable.
           stock_returned = now_available and not previous.get("any_available", False)
+
+          alert_count = 0
 
           if stock_returned:
               token = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -156,7 +173,7 @@ jobs:
               url = f"https://api.telegram.org/bot{token}/sendMessage"
 
               # Maximum 50 Telegram alerts for one stock-return event.
-              for n in range(50):
+              for n in range(1, 51):
                   resp = requests.post(
                       url,
                       json={
@@ -165,11 +182,40 @@ jobs:
                       },
                       timeout=20
                   )
-                  print("Telegram:", resp.status_code)
+                  print("Telegram:", resp.status_code, "alert", n)
 
-                  if resp.status_code == 429:
+                  if resp.status_code == 200:
+                      alert_count = n
+                  elif resp.status_code == 429:
                       print("Telegram rate limit reached; stopping burst.")
                       break
+                  else:
+                      print("Telegram error:", resp.text[:500])
+                      break
+
+          # Log every successful stock check to Google Sheet.
+          timestamp = datetime.now(timezone.utc).isoformat()
+          event = "STOCK_RETURNED" if stock_returned else "CHECK"
+
+          for item in results:
+              payload = {
+                  "timestamp": timestamp,
+                  "store": item["store"],
+                  "colour": item["colour"],
+                  "storage": item["storage"],
+                  "pickup_status": item["status"],
+                  "event": event,
+                  "alert_number": alert_count if stock_returned and item["status"] == "available" else "",
+              }
+
+              try:
+                  sheet_resp = requests.post(SHEET_WEBHOOK, json=payload, timeout=20)
+                  print("Google Sheet:", sheet_resp.status_code, item["store"], item["colour"])
+                  if sheet_resp.status_code >= 400:
+                      print("Google Sheet error:", sheet_resp.text[:500])
+              except Exception as e:
+                  # Sheet logging failure must not break stock monitoring/state handling.
+                  print("Google Sheet logging error:", e)
 
           STATE_FILE.write_text(
               json.dumps(
