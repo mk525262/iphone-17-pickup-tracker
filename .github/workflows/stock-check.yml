@@ -155,6 +155,46 @@ jobs:
                       time.sleep(2)
               return sent
 
+          def resolve_chat_id(token, configured_chat_id):
+              # Verify the configured target first. If it is invalid, recover the most recent
+              # private chat that has contacted this bot when getUpdates is available.
+              base = f"https://api.telegram.org/bot{token}"
+              try:
+                  r = SESSION.post(f"{base}/getChat", json={"chat_id": configured_chat_id}, timeout=20)
+                  if r.status_code == 200 and r.json().get("ok") is True:
+                      chat = r.json().get("result", {})
+                      print(f"Telegram target verified: type={chat.get('type')} id_suffix={str(configured_chat_id)[-4:]}")
+                      return configured_chat_id
+              except Exception as e:
+                  print("Telegram configured-chat check failed:", e)
+
+              try:
+                  wh = SESSION.get(f"{base}/getWebhookInfo", timeout=20)
+                  webhook = (wh.json().get("result", {}) if wh.ok else {}).get("url", "")
+                  if webhook:
+                      print("Telegram webhook is configured; cannot recover chat via getUpdates.")
+                      return configured_chat_id
+
+                  updates = SESSION.get(f"{base}/getUpdates", params={"limit": 100}, timeout=20)
+                  body = updates.json()
+                  candidates = []
+                  for upd in body.get("result", []) if body.get("ok") else []:
+                      msg = upd.get("message") or upd.get("edited_message") or upd.get("channel_post")
+                      if not msg:
+                          continue
+                      chat = msg.get("chat") or {}
+                      if chat.get("type") == "private" and chat.get("id") is not None:
+                          candidates.append((upd.get("update_id", 0), str(chat["id"])))
+                  if candidates:
+                      candidates.sort(key=lambda x: x[0])
+                      recovered = candidates[-1][1]
+                      print(f"Recovered latest private Telegram chat: id_suffix={recovered[-4:]}")
+                      return recovered
+              except Exception as e:
+                  print("Telegram chat recovery skipped:", e)
+
+              return configured_chat_id
+
           def post_sheet(payload):
               try:
                   resp = SESSION.post(SHEET_WEBHOOK, json=payload, timeout=20)
@@ -200,7 +240,7 @@ jobs:
           stock_returned = now_available and not previous_any
 
           token = os.environ["TELEGRAM_BOT_TOKEN"]
-          chat_id = os.environ["TELEGRAM_CHAT_ID"]
+          chat_id = resolve_chat_id(token, os.environ["TELEGRAM_CHAT_ID"])
 
           # Any single available colour at any watched store is enough to trigger the full 50-message alert.
           if stock_returned:
