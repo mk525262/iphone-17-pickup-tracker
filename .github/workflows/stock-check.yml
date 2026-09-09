@@ -103,7 +103,7 @@ jobs:
                           print(f"{store_name} | {colour} | {status}")
 
                           # Apple currently returns available / unavailable / ineligible.
-                          # ineligible means this pickup option is not eligible, so it is not stock.
+                          # ineligible is not pickup stock, but it is a valid response state.
                           if status in ("available", "unavailable", "ineligible"):
                               found.append({
                                   "store": store_name,
@@ -217,15 +217,15 @@ jobs:
               sent = send_telegram(message, token, chat_id, required_count=50)
               print(f"STOCK RETURN ALERT: {sent}/50 messages delivered")
 
-          # Daily reports: 09:00, 13:00, 17:00 and 21:00 IST. If GitHub starts a run a few minutes late,
-          # send the missed slot once rather than silently skipping it.
+          # Daily reports: 09:00, 13:00, 17:00 and 21:00 IST. GitHub can delay scheduled runs,
+          # so a slot is accepted for up to 20 minutes after its target time and is sent only once.
           daily_sent = previous.get("daily_sent") if isinstance(previous.get("daily_sent"), dict) else {}
           daily_sent = dict(daily_sent)
-          slots = [(9, 0), (13, 0), (17, 0), (21, 0)]
-          for hour, minute in slots:
+          for hour, minute in ((9, 0), (13, 0), (17, 0), (21, 0)):
               slot_dt = now_ist.replace(hour=hour, minute=minute, second=0, microsecond=0)
               slot_key = slot_dt.strftime("%Y-%m-%d-%H:%M")
-              if now_ist >= slot_dt and slot_key not in daily_sent:
+              delay = now_ist - slot_dt
+              if timedelta(0) <= delay <= timedelta(minutes=20) and slot_key not in daily_sent:
                   if now_available:
                       lines = ["🟢 AVAILABLE"]
                       for store in STORES:
