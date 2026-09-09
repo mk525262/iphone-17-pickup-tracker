@@ -45,9 +45,14 @@ jobs:
               "Sage": "MG6N4HN/A",
           }
 
+          # Every current official Apple Retail Store in India, using that store's own address PIN.
           STORES = {
-              "Apple Saket": "110017",
+              "Apple BKC": "400051",
+              "Apple Borivali": "400066",
+              "Apple Hebbal": "560092",
+              "Apple Koregaon Park": "411001",
               "Apple Noida": "201301",
+              "Apple Saket": "110017",
           }
 
           API = "https://www.apple.com/in/shop/retail/pickup-message"
@@ -121,9 +126,15 @@ jobs:
 
           if stock_returned:
               message = "🚨 iPhone 17 PICKUP AVAILABLE 🚨\n\n"
-              for item in available:
-                  message += f"📍 {item['store']}\n🎨 {item['colour']}\n💾 {item['storage']}\n🔗 https://www.apple.com/in/shop/buy-iphone/iphone-17\n\n"
-              message += "⚡ Apple Store pickup stock detected."
+              for store in STORES:
+                  store_items = [x for x in available if x["store"] == store]
+                  if not store_items:
+                      continue
+                  message += f"📍 {store}\n"
+                  for item in store_items:
+                      message += f"🎨 {item['colour']} | 💾 {item['storage']}\n"
+                  message += "\n"
+              message += "🔗 https://www.apple.com/in/shop/buy-iphone/iphone-17\n\n⚡ Apple Store pickup stock detected."
               for n in range(1, 51):
                   payload = dict(telegram_payload_base)
                   payload["text"] = message
@@ -143,10 +154,12 @@ jobs:
           if daily_report:
               if now_available:
                   lines = ["🟢 AVAILABLE"]
-                  for item in available:
-                      lines.append(f"📍 {item['store']} | 🎨 {item['colour']} | 💾 {item['storage']}")
+                  for store in STORES:
+                      store_items = [x for x in available if x["store"] == store]
+                      for item in store_items:
+                          lines.append(f"📍 {store} | 🎨 {item['colour']} | 💾 {item['storage']}")
               else:
-                  lines = ["🔴 UNAVAILABLE", "All watched iPhone 17 256GB variants are currently unavailable at Apple Saket and Apple Noida."]
+                  lines = ["🔴 UNAVAILABLE", "All watched iPhone 17 256GB variants are currently unavailable at all 6 Apple Retail Stores in India."]
               daily_message = "📊 iPhone 17 Pickup Status\n\n" + "\n".join(lines) + f"\n\n🕐 {now_ist.strftime('%Y-%m-%d %H:%M:%S')} IST"
               payload = dict(telegram_payload_base)
               payload["text"] = daily_message
