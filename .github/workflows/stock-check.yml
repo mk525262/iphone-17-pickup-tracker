@@ -230,14 +230,14 @@ jobs:
           now_ist = datetime.now(IST)
           timestamp = now_ist.strftime("%Y-%m-%d %H:%M:%S")
 
-          # Never turn a partial/broken Apple response into "out of stock".
-          if successful_checks != len(STORES):
-              print(f"INCOMPLETE CHECK: {successful_checks}/{len(STORES)} stores succeeded; preserving previous state.")
-              raise SystemExit(0)
+          complete_check = successful_checks == len(STORES)
+          if not complete_check:
+              print(f"INCOMPLETE CHECK: {successful_checks}/{len(STORES)} stores succeeded; confirmed stock will still alert, but state will not be reset.")
 
-          now_available = bool(available)
+          confirmed_available = bool(available)
           previous_any = bool(previous.get("any_available", False))
-          stock_returned = now_available and not previous_any
+          stock_returned = confirmed_available and not previous_any
+          now_available = confirmed_available if complete_check else (previous_any or confirmed_available)
 
           token = os.environ["TELEGRAM_BOT_TOKEN"]
           chat_id = resolve_chat_id(token, os.environ["TELEGRAM_CHAT_ID"])
@@ -265,8 +265,10 @@ jobs:
               slot_dt = now_ist.replace(hour=hour, minute=minute, second=0, microsecond=0)
               slot_key = slot_dt.strftime("%Y-%m-%d-%H:%M")
               delay = now_ist - slot_dt
-              if timedelta(0) <= delay <= timedelta(minutes=20) and slot_key not in daily_sent:
-                  if now_available:
+              if now_ist >= slot_dt and slot_key not in daily_sent:
+                  if not complete_check and not confirmed_available:
+                      continue
+                  if confirmed_available:
                       lines = ["🟢 AVAILABLE"]
                       for store in STORES:
                           for item in [x for x in available if x["store"] == store]:
@@ -307,9 +309,13 @@ jobs:
                   "alert_number": 50 if stock_returned and item["status"] == "available" else "",
               })
 
+          state_available_keys = sorted(f"{x['store']}|{x['colour']}|{x['storage']}" for x in available)
+          if not complete_check and not confirmed_available:
+              state_available_keys = previous.get("available_keys", [])
+
           STATE_FILE.write_text(json.dumps({
               "any_available": now_available,
-              "available_keys": sorted(f"{x['store']}|{x['colour']}|{x['storage']}" for x in available),
+              "available_keys": state_available_keys,
               "daily_sent": clean_daily,
           }, indent=2))
           PY
