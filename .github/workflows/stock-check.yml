@@ -265,7 +265,7 @@ jobs:
               slot_dt = now_ist.replace(hour=hour, minute=minute, second=0, microsecond=0)
               slot_key = slot_dt.strftime("%Y-%m-%d-%H:%M")
               delay = now_ist - slot_dt
-              if now_ist >= slot_dt and slot_key not in daily_sent:
+              if timedelta(0) <= delay <= timedelta(minutes=20) and slot_key not in daily_sent:
                   if not complete_check and not confirmed_available:
                       continue
                   if confirmed_available:
