@@ -1,8 +1,6 @@
 name: iPhone 17 Pickup Stock Monitor
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -36,298 +34,126 @@ jobs:
           from datetime import datetime, timedelta
           from pathlib import Path
           from zoneinfo import ZoneInfo
-
           import requests
 
-          PARTS = {
-              "Black": "MG6J4HN/A",
-              "White": "MG6K4HN/A",
-              "Mist Blue": "MG6L4HN/A",
-              "Lavender": "MG6M4HN/A",
-              "Sage": "MG6N4HN/A",
-          }
-
-          STORES = {
-              "Apple BKC": "400051",
-              "Apple Borivali": "400066",
-              "Apple Hebbal": "560092",
-              "Apple Koregaon Park": "411001",
-              "Apple Noida": "201301",
-              "Apple Saket": "110017",
-          }
-
+          PARTS = {"Black":"MG6J4HN/A","White":"MG6K4HN/A","Mist Blue":"MG6L4HN/A","Lavender":"MG6M4HN/A","Sage":"MG6N4HN/A"}
+          STORES = {"Apple BKC":"400051","Apple Borivali":"400066","Apple Hebbal":"560092","Apple Koregaon Park":"411001","Apple Noida":"201301","Apple Saket":"110017"}
           API = "https://www.apple.com/in/shop/retail/pickup-message"
           STATE_FILE = Path("state.json")
           SHEET_WEBHOOK = os.environ["GOOGLE_SHEET_WEBHOOK"]
           IST = ZoneInfo("Asia/Kolkata")
           SESSION = requests.Session()
-          SESSION.headers.update({
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
-              "Accept": "application/json, text/plain, */*",
-              "Referer": "https://www.apple.com/in/shop/buy-iphone/iphone-17",
-          })
+          SESSION.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36","Accept":"application/json, text/plain, */*","Referer":"https://www.apple.com/in/shop/buy-iphone/iphone-17"})
 
           def check_store(store_name, pin):
-              params = {
-                  "pl": "true",
-                  "searchNearby": "true",
-                  "location": pin,
-                  "mts.0": "regular",
-              }
-              for i, part in enumerate(PARTS.values()):
-                  params[f"parts.{i}"] = part
-
-              last_error = None
+              params={"pl":"true","searchNearby":"true","location":pin,"mts.0":"regular"}
+              for i, part in enumerate(PARTS.values()): params[f"parts.{i}"]=part
+              last_error=None
               for attempt in range(3):
                   try:
-                      r = SESSION.get(API, params=params, timeout=20)
-                      r.raise_for_status()
-                      data = r.json()
-                      stores = data.get("body", {}).get("stores", [])
-                      target = None
+                      r=SESSION.get(API,params=params,timeout=20); r.raise_for_status(); data=r.json()
+                      stores=data.get("body",{}).get("stores",[]); target=None; wanted=store_name.lower(); short=wanted.replace("apple ","")
                       for s in stores:
-                          name = (s.get("storeName") or "").lower()
-                          wanted = store_name.lower()
-                          short = wanted.replace("apple ", "")
-                          if wanted in name or short in name:
-                              target = s
-                              break
-                      if not target:
-                          raise RuntimeError("store not present in Apple response")
-
-                      found = []
-                      parts_availability = target.get("partsAvailability") or {}
-                      for colour, part in PARTS.items():
-                          info = parts_availability.get(part) or {}
-                          status = info.get("pickupDisplay")
-                          print(f"{store_name} | {colour} | {status}")
-
-                          # Apple currently returns available / unavailable / ineligible.
-                          # ineligible is not pickup stock, but it is a valid response state.
-                          if status in ("available", "unavailable", "ineligible"):
-                              found.append({
-                                  "store": store_name,
-                                  "colour": colour,
-                                  "storage": "256GB",
-                                  "status": status,
-                              })
-                          else:
-                              raise RuntimeError(f"unknown pickup status: {status!r}")
-                      return found, True
+                          name=(s.get("storeName") or "").lower()
+                          if wanted in name or short in name: target=s; break
+                      if not target: raise RuntimeError("store not present in Apple response")
+                      found=[]; pa=target.get("partsAvailability") or {}
+                      for colour,part in PARTS.items():
+                          status=(pa.get(part) or {}).get("pickupDisplay"); print(f"{store_name} | {colour} | {status}")
+                          if status in ("available","unavailable","ineligible"):
+                              found.append({"store":store_name,"colour":colour,"storage":"256GB","status":status})
+                          else: raise RuntimeError(f"unknown pickup status: {status!r}")
+                      return found,True
                   except Exception as e:
-                      last_error = e
-                      if attempt < 2:
-                          time.sleep(1.5 * (attempt + 1))
-              print(f"{store_name}: CHECK ERROR after retries: {last_error}")
-              return [], False
+                      last_error=e
+                      if attempt<2: time.sleep(1.5*(attempt+1))
+              print(f"{store_name}: CHECK ERROR after retries: {last_error}"); return [],False
 
-          def send_telegram(text, token, chat_id, required_count=1):
-              url = f"https://api.telegram.org/bot{token}/sendMessage"
-              payload = {
-                  "chat_id": chat_id,
-                  "text": text,
-                  "disable_web_page_preview": True,
-              }
-              sent = 0
-              while sent < required_count:
+          def send_telegram(text,token,chat_id,required_count=1):
+              url=f"https://api.telegram.org/bot{token}/sendMessage"; payload={"chat_id":chat_id,"text":text,"disable_web_page_preview":True}; sent=0
+              while sent<required_count:
                   try:
-                      resp = SESSION.post(url, json=payload, timeout=20)
-                      if resp.status_code == 200:
-                          body = resp.json()
-                          if body.get("ok") is True:
-                              sent += 1
-                              print(f"Telegram delivered {sent}/{required_count}")
-                              continue
-                          print("Telegram returned HTTP 200 but ok=false:", resp.text[:500])
-                          return sent
-                      if resp.status_code == 429:
-                          try:
-                              retry_after = int(resp.json().get("parameters", {}).get("retry_after", 2))
-                          except Exception:
-                              retry_after = 2
-                          print(f"Telegram rate limit; waiting {retry_after}s")
-                          time.sleep(max(1, retry_after))
-                          continue
-                      print(f"Telegram HTTP {resp.status_code}: {resp.text[:500]}")
-                      return sent
-                  except Exception as e:
-                      print(f"Telegram request error: {e}")
-                      time.sleep(2)
+                      resp=SESSION.post(url,json=payload,timeout=20)
+                      if resp.status_code==200 and resp.json().get("ok") is True: sent+=1; print(f"Telegram delivered {sent}/{required_count}"); continue
+                      if resp.status_code==429:
+                          try: retry_after=int(resp.json().get("parameters",{}).get("retry_after",2))
+                          except Exception: retry_after=2
+                          print(f"Telegram rate limit; waiting {retry_after}s"); time.sleep(max(1,retry_after)); continue
+                      print(f"Telegram HTTP {resp.status_code}: {resp.text[:500]}"); return sent
+                  except Exception as e: print(f"Telegram request error: {e}"); time.sleep(2)
               return sent
 
-          def resolve_chat_id(token, configured_chat_id):
-              # Verify the configured target first. If it is invalid, recover the most recent
-              # private chat that has contacted this bot when getUpdates is available.
-              base = f"https://api.telegram.org/bot{token}"
+          def resolve_chat_id(token,configured_chat_id):
+              base=f"https://api.telegram.org/bot{token}"
               try:
-                  r = SESSION.post(f"{base}/getChat", json={"chat_id": configured_chat_id}, timeout=20)
-                  if r.status_code == 200 and r.json().get("ok") is True:
-                      chat = r.json().get("result", {})
-                      print(f"Telegram target verified: type={chat.get('type')} id_suffix={str(configured_chat_id)[-4:]}")
-                      return configured_chat_id
-              except Exception as e:
-                  print("Telegram configured-chat check failed:", e)
-
+                  r=SESSION.post(f"{base}/getChat",json={"chat_id":configured_chat_id},timeout=20)
+                  if r.status_code==200 and r.json().get("ok") is True: return configured_chat_id
+              except Exception: pass
               try:
-                  wh = SESSION.get(f"{base}/getWebhookInfo", timeout=20)
-                  webhook = (wh.json().get("result", {}) if wh.ok else {}).get("url", "")
-                  if webhook:
-                      print("Telegram webhook is configured; cannot recover chat via getUpdates.")
-                      return configured_chat_id
-
-                  updates = SESSION.get(f"{base}/getUpdates", params={"limit": 100}, timeout=20)
-                  body = updates.json()
-                  candidates = []
-                  for upd in body.get("result", []) if body.get("ok") else []:
-                      msg = upd.get("message") or upd.get("edited_message") or upd.get("channel_post")
-                      if not msg:
-                          continue
-                      chat = msg.get("chat") or {}
-                      if chat.get("type") == "private" and chat.get("id") is not None:
-                          candidates.append((upd.get("update_id", 0), str(chat["id"])))
-                  if candidates:
-                      candidates.sort(key=lambda x: x[0])
-                      recovered = candidates[-1][1]
-                      print(f"Recovered latest private Telegram chat: id_suffix={recovered[-4:]}")
-                      return recovered
-              except Exception as e:
-                  print("Telegram chat recovery skipped:", e)
-
+                  wh=SESSION.get(f"{base}/getWebhookInfo",timeout=20); webhook=(wh.json().get("result",{}) if wh.ok else {}).get("url","")
+                  if webhook: return configured_chat_id
+                  body=SESSION.get(f"{base}/getUpdates",params={"limit":100},timeout=20).json(); candidates=[]
+                  for upd in body.get("result",[]) if body.get("ok") else []:
+                      msg=upd.get("message") or upd.get("edited_message") or upd.get("channel_post") or {}; chat=msg.get("chat") or {}
+                      if chat.get("type")=="private" and chat.get("id") is not None: candidates.append((upd.get("update_id",0),str(chat["id"])))
+                  if candidates: candidates.sort(key=lambda x:x[0]); return candidates[-1][1]
+              except Exception: pass
               return configured_chat_id
 
           def post_sheet(payload):
-              try:
-                  resp = SESSION.post(SHEET_WEBHOOK, json=payload, timeout=20)
-                  print("Google Sheet:", resp.status_code, payload["store"], payload["colour"])
-                  return resp.status_code < 400
-              except Exception as e:
-                  print("Google Sheet logging error:", e)
-                  return False
+              try: return SESSION.post(SHEET_WEBHOOK,json=payload,timeout=20).status_code<400
+              except Exception: return False
 
-          previous = {
-              "any_available": False,
-              "available_keys": [],
-              "daily_sent": {},
-          }
+          previous={"any_available":False,"available_keys":[],"daily_sent":{}}
           if STATE_FILE.exists():
               try:
-                  loaded = json.loads(STATE_FILE.read_text())
-                  if isinstance(loaded, dict):
-                      previous.update(loaded)
-              except Exception as e:
-                  print("State read warning:", e)
+                  loaded=json.loads(STATE_FILE.read_text())
+                  if isinstance(loaded,dict): previous.update(loaded)
+              except Exception: pass
 
-          results = []
-          available = []
-          successful_checks = 0
-          for store, pin in STORES.items():
-              items, ok = check_store(store, pin)
-              if ok:
-                  successful_checks += 1
-                  results.extend(items)
-                  available.extend([x for x in items if x["status"] == "available"])
+          results=[]; available=[]; successful_checks=0
+          for store,pin in STORES.items():
+              items,ok=check_store(store,pin)
+              if ok: successful_checks+=1; results.extend(items); available.extend([x for x in items if x["status"]=="available"])
 
-          now_ist = datetime.now(IST)
-          timestamp = now_ist.strftime("%Y-%m-%d %H:%M:%S")
+          now_ist=datetime.now(IST); timestamp=now_ist.strftime("%Y-%m-%d %H:%M:%S"); complete_check=successful_checks==len(STORES); confirmed_available=bool(available); previous_any=bool(previous.get("any_available",False)); stock_returned=confirmed_available and not previous_any; now_available=confirmed_available if complete_check else (previous_any or confirmed_available)
+          token=os.environ["TELEGRAM_BOT_TOKEN"]; chat_id=resolve_chat_id(token,os.environ["TELEGRAM_CHAT_ID"])
 
-          complete_check = successful_checks == len(STORES)
-          if not complete_check:
-              print(f"INCOMPLETE CHECK: {successful_checks}/{len(STORES)} stores succeeded; confirmed stock will still alert, but state will not be reset.")
-
-          confirmed_available = bool(available)
-          previous_any = bool(previous.get("any_available", False))
-          stock_returned = confirmed_available and not previous_any
-          now_available = confirmed_available if complete_check else (previous_any or confirmed_available)
-
-          token = os.environ["TELEGRAM_BOT_TOKEN"]
-          chat_id = resolve_chat_id(token, os.environ["TELEGRAM_CHAT_ID"])
-
-          # Any single available colour at any watched store is enough to trigger the full 50-message alert.
           if stock_returned:
-              message = "🚨 iPhone 17 PICKUP AVAILABLE 🚨\n\n"
+              message="🚨 iPhone 17 PICKUP AVAILABLE 🚨\n\n"
               for store in STORES:
-                  store_items = [x for x in available if x["store"] == store]
-                  if not store_items:
-                      continue
-                  message += f"📍 {store}\n"
-                  for item in store_items:
-                      message += f"🎨 {item['colour']} | 💾 {item['storage']}\n"
-                  message += "\n"
-              message += "🔗 https://www.apple.com/in/shop/buy-iphone/iphone-17\n\n⚡ Apple Store pickup stock detected."
-              sent = send_telegram(message, token, chat_id, required_count=50)
-              print(f"STOCK RETURN ALERT: {sent}/50 messages delivered")
+                  items=[x for x in available if x["store"]==store]
+                  if items:
+                      message+=f"📍 {store}\n"+"\n".join(f"🎨 {x['colour']} | 💾 {x['storage']}" for x in items)+"\n\n"
+              message+="🔗 https://www.apple.com/in/shop/buy-iphone/iphone-17\n\n⚡ Apple Store pickup stock detected."
+              print(f"STOCK RETURN ALERT: {send_telegram(message,token,chat_id,50)}/50 messages delivered")
 
-          # Daily reports: 09:00, 13:00, 17:00 and 21:00 IST. GitHub can delay scheduled runs,
-          # so a slot is accepted for up to 20 minutes after its target time and is sent only once.
-          daily_sent = previous.get("daily_sent") if isinstance(previous.get("daily_sent"), dict) else {}
-          daily_sent = dict(daily_sent)
-          for hour, minute in ((9, 0), (13, 0), (17, 0), (21, 0)):
-              slot_dt = now_ist.replace(hour=hour, minute=minute, second=0, microsecond=0)
-              slot_key = slot_dt.strftime("%Y-%m-%d-%H:%M")
-              delay = now_ist - slot_dt
-              if timedelta(0) <= delay <= timedelta(minutes=20) and slot_key not in daily_sent:
-                  if not complete_check and not confirmed_available:
-                      continue
-                  if confirmed_available:
-                      lines = ["🟢 AVAILABLE"]
-                      for store in STORES:
-                          for item in [x for x in available if x["store"] == store]:
-                              lines.append(f"📍 {store} | 🎨 {item['colour']} | 💾 {item['storage']}")
-                  else:
-                      lines = [
-                          "🔴 UNAVAILABLE",
-                          "All watched iPhone 17 256GB variants are currently unavailable at the watched Apple Retail Stores.",
-                      ]
-                  daily_message = (
-                      "📊 iPhone 17 Pickup Status\n\n" +
-                      "\n".join(lines) +
-                      f"\n\n🕐 {timestamp} IST"
-                  )
-                  delivered = send_telegram(daily_message, token, chat_id, required_count=1)
-                  if delivered == 1:
-                      daily_sent[slot_key] = timestamp
+          daily_sent=previous.get("daily_sent") if isinstance(previous.get("daily_sent"),dict) else {}; daily_sent=dict(daily_sent)
+          for hour,minute in ((9,0),(13,0),(17,0),(21,0)):
+              slot_dt=now_ist.replace(hour=hour,minute=minute,second=0,microsecond=0); slot_key=slot_dt.strftime("%Y-%m-%d-%H:%M"); delay=now_ist-slot_dt
+              if timedelta(0)<=delay<=timedelta(minutes=20) and slot_key not in daily_sent:
+                  if not complete_check and not confirmed_available: continue
+                  lines=["🟢 AVAILABLE"]+[f"📍 {x['store']} | 🎨 {x['colour']} | 💾 {x['storage']}" for x in available] if confirmed_available else ["🔴 UNAVAILABLE","All watched iPhone 17 256GB variants are currently unavailable at the watched Apple Retail Stores."]
+                  delivered=send_telegram("📊 iPhone 17 Pickup Status\n\n"+"\n".join(lines)+f"\n\n🕐 {timestamp} IST",token,chat_id,1)
+                  if delivered==1: daily_sent[slot_key]=timestamp
 
-          cutoff = now_ist - timedelta(days=10)
-          clean_daily = {}
-          for key, value in daily_sent.items():
+          cutoff=now_ist-timedelta(days=10); clean_daily={}
+          for key,value in daily_sent.items():
               try:
-                  dt = datetime.strptime(key, "%Y-%m-%d-%H:%M").replace(tzinfo=IST)
-                  if dt >= cutoff:
-                      clean_daily[key] = value
-              except Exception:
-                  pass
+                  dt=datetime.strptime(key,"%Y-%m-%d-%H:%M").replace(tzinfo=IST)
+                  if dt>=cutoff: clean_daily[key]=value
+              except Exception: pass
 
-          event = "STOCK_RETURNED" if stock_returned else "CHECK"
+          event="STOCK_RETURNED" if stock_returned else "CHECK"
           for item in results:
-              post_sheet({
-                  "timestamp": timestamp,
-                  "store": item["store"],
-                  "colour": item["colour"],
-                  "storage": item["storage"],
-                  "pickup_status": item["status"],
-                  "event": event,
-                  "alert_number": 50 if stock_returned and item["status"] == "available" else "",
-              })
+              post_sheet({"timestamp":timestamp,"store":item["store"],"colour":item["colour"],"storage":item["storage"],"pickup_status":item["status"],"event":event,"alert_number":50 if stock_returned and item["status"]=="available" else ""})
 
-          state_available_keys = sorted(f"{x['store']}|{x['colour']}|{x['storage']}" for x in available)
-          if not complete_check and not confirmed_available:
-              state_available_keys = previous.get("available_keys", [])
-
-          STATE_FILE.write_text(json.dumps({
-              "any_available": now_available,
-              "available_keys": state_available_keys,
-              "daily_sent": clean_daily,
-          }, indent=2))
+          keys=sorted(f"{x['store']}|{x['colour']}|{x['storage']}" for x in available)
+          if not complete_check and not confirmed_available: keys=previous.get("available_keys",[])
+          STATE_FILE.write_text(json.dumps({"any_available":now_available,"available_keys":keys,"daily_sent":clean_daily},indent=2))
           PY
 
       - name: Save state
         run: |
           git add state.json
-          if git diff --cached --quiet; then
-            echo "State unchanged."
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "Update stock monitor state"
-            git push
-          fi
+          if git diff --cached --quiet; then echo "State unchanged."; else git config user.name "github-actions[bot]"; git config user.email "41898282+github-actions[bot]@users.noreply.github.com"; git commit -m "Update stock monitor state"; git push; fi
